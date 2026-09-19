@@ -14,12 +14,10 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -29,8 +27,13 @@ import com.sun.net.httpserver.HttpServer;
  */
 public class HttpBridge {
 
-    // 请求体上限：绑定同步与指令转发远用不到 1MB，超限直接拒绝
+    // 请求体上限：绑定同步与指令转发远用不到 1MB。
+    // 读取是流式受限的（见 readLimited）：最多在内存中保留 MAX_BODY_BYTES+1 字节，
+    // 读到第 +1 字节即判定超限并停止读取——绝不把超大请求体整个读进内存后再拒绝
     private static final int MAX_BODY_BYTES = 1024 * 1024;
+    // HTTP 处理线程上限：固定池。/command 的 RCON 执行内联在 handler 线程完成，
+    // 线程占用上界由 RconClient 的 connect/so 双超时保证
+    private static final int MAX_HTTP_THREADS = 16;
 
     private final Config config;
     private final BindingStore bindingStore;
@@ -39,7 +42,7 @@ public class HttpBridge {
     private final Gson gson = new Gson();
 
     private HttpServer server;
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final ExecutorService executor = Executors.newFixedThreadPool(MAX_HTTP_THREADS);
 
     public HttpBridge(Config config, BindingStore bindingStore, RconClient rconClient, Logger logger) {
         this.config = config;
@@ -146,28 +149,14 @@ public class HttpBridge {
             return;
         }
 
-        CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
-            try {
-                return rconClient.execute(serverName, command, timeout);
-            } catch (IOException e) {
-                throw new RuntimeException(e.getMessage(), e);
-            }
-        }, executor);
-
+        // 内联执行：RconClient 内部有 connect/so 双超时，线程占用有上界；
+        // 之前经共享线程池 supplyAsync 再 get，池满时 RCON 任务排队、所有 handler
+        // 线程都在等待自己排队的任务，会集体超时
         try {
-            String output = future.get(timeout + 5, TimeUnit.SECONDS);
+            String output = rconClient.execute(serverName, command, timeout);
             sendJson(ex, 200, okDataString(output));
-        } catch (TimeoutException te) {
-            future.cancel(true);
-            sendJson(ex, 504, fail("RCON 执行超时"));
-        } catch (Exception e) {
-            // 解包 CompletableFuture 的包装异常（ExecutionException → RuntimeException → IOException），
-            // 把最内层的原因（如 "Connection refused"）直接给调用方，避免带异常类名前缀
-            Throwable err = e;
-            while (err.getCause() != null && err.getCause() != err) {
-                err = err.getCause();
-            }
-            sendJson(ex, 500, fail(err.getMessage() != null ? err.getMessage() : err.toString()));
+        } catch (IOException e) {
+            sendJson(ex, 500, fail(e.getMessage() != null ? e.getMessage() : e.toString()));
         }
     }
 
@@ -192,8 +181,10 @@ public class HttpBridge {
 
     private JsonObject readJson(HttpExchange ex) throws IOException {
         try (InputStream in = ex.getRequestBody()) {
-            byte[] bytes = in.readAllBytes();
-            if (bytes.length > MAX_BODY_BYTES) {
+            // 流式受限读取：读到 MAX_BODY_BYTES+1 字节即判超限（413）并停止，
+            // 内存占用恒不超过限制本身，与请求体实际大小无关
+            byte[] bytes = readLimited(in, MAX_BODY_BYTES);
+            if (bytes == null) {
                 sendJson(ex, 413, fail("请求体过大"));
                 return null;
             }
@@ -208,6 +199,23 @@ public class HttpBridge {
                 return null;
             }
         }
+    }
+
+    /** 流式读取至多 limit 字节；超过 limit（读到 limit+1 字节即停）返回 null。 */
+    private static byte[] readLimited(InputStream in, int limit) throws IOException {
+        byte[] buf = new byte[limit + 1];
+        int off = 0;
+        while (off < buf.length) {
+            int r = in.read(buf, off, buf.length - off);
+            if (r < 0) {
+                break;
+            }
+            off += r;
+        }
+        if (off > limit) {
+            return null;
+        }
+        return Arrays.copyOf(buf, off);
     }
 
     private static JsonObject ok(String message) {

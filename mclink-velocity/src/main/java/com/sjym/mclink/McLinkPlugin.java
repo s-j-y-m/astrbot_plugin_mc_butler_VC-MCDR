@@ -21,7 +21,7 @@ import com.google.inject.Inject;
 @Plugin(
     id = "mclink-velocity",
     name = "McLinkVelocity",
-    version = "1.0.1",
+    version = "1.0.2",
     description = "QQ bind guard and MCDR command bridge",
     authors = {"Sjym"}
 )
