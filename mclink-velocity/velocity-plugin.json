@@ -1,0 +1,8 @@
+{
+  "id": "mclink-velocity",
+  "name": "McLinkVelocity",
+  "version": "1.0.1",
+  "description": "QQ bind guard and MCDR command bridge",
+  "authors": ["Sjym"],
+  "main": "com.sjym.mclink.McLinkPlugin"
+}
