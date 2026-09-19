@@ -31,8 +31,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 # 替换前必须先停止 Velocity（jar 被 JVM 锁定），拷贝后再启动生效
 ```
 
-> 编译需 JDK 25（`F:\Java\jdk-25.0.2`），因为 velocity jar 内注解处理器是 class file 69.0。
-> 若 JDK 路径不同，改 `build.ps1` 顶部 `$Javac` / `$Jar` 即可。
+> 编译需 JDK 25+（velocity jar 内注解处理器是 class file 69.0，旧 javac 读不了；产物 `--release 21`，运行时 Java 21 兼容）。
+> `build.ps1` 按顺序自动探测：`-JdkRoot` 参数 → `JAVA_HOME` → PATH，取第一个满足 25+ 的；都找不到会报错提示。
+> 想固定本机 JDK：在旁边建 `build.local.ps1`（已被 .gitignore 排除）调用 `& (Join-Path $PSScriptRoot "build.ps1") -JdkRoot "你的JDK路径"`，脚本内不含任何机器专属路径。
 
 ## 配置
 
